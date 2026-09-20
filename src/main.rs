@@ -20,10 +20,16 @@ fn handle_connection(mut stream:TcpStream) {
     stream.read(&mut buf).unwrap();
     let messaage_size  = i32::from_be_bytes(buf[0..4].try_into().unwrap());
     let _request_api_key = i16::from_be_bytes(buf[4..6].try_into().unwrap());
-    let _request_api_version = i16::from_be_bytes(buf[6..8].try_into().unwrap());
+    let request_api_version = i16::from_be_bytes(buf[6..8].try_into().unwrap());
     let correlation_id =  i32::from_be_bytes(buf[8..12].try_into().unwrap());
+
+    let mut error_code: i16 = 0;
+    if request_api_version > 4 {
+        error_code = 35;
+    }
     stream.write_all(&messaage_size.to_be_bytes()).unwrap();
     stream.write_all(&correlation_id.to_be_bytes()).unwrap();
+    stream.write_all(&error_code.to_be_bytes()).unwrap();
 }
 
 
