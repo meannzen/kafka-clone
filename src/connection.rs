@@ -1,14 +1,12 @@
-#![allow(dead_code)]
-
 use std::io::Cursor;
 
 use bytes::{Buf, BytesMut};
 use tokio::{
-    io::{self, AsyncReadExt, AsyncWriteExt, BufWriter},
+    io::{AsyncReadExt, AsyncWriteExt, BufWriter},
     net::TcpStream,
 };
 
-use crate::message::Message;
+use crate::protocol::{self, Request};
 
 #[derive(Debug)]
 pub struct Connection {
@@ -24,9 +22,9 @@ impl Connection {
         }
     }
 
-    pub async fn read_message(&mut self) -> crate::Result<Message> {
+    pub async fn read_request(&mut self) -> crate::Result<Request> {
         loop {
-            if let Ok(message) = self.parse_message() {
+            if let Ok(message) = self.parse_request() {
                 return Ok(message);
             }
 
@@ -40,34 +38,21 @@ impl Connection {
         }
     }
 
-    fn parse_message(&mut self) -> crate::Result<Message> {
+    fn parse_request(&mut self) -> crate::Result<Request> {
         let mut cursor = Cursor::new(&self.buffer[..]);
-        match Message::parse_message(&mut cursor) {
-            Ok(message) => {
+        match protocol::Request::parse(&mut cursor) {
+            Ok(reponse) => {
                 let len = cursor.position() as usize;
                 self.buffer.advance(len);
-                Ok(message)
+                Ok(reponse)
             }
             Err(err) => Err(err.into()),
         }
     }
 
-    pub async fn write_message(&mut self, message: Message) -> std::io::Result<()> {
-        self.write_i32(message.message_size).await?;
-        self.write_i32(message.request_header.correlation_id)
-            .await?;
-        self.write_i16(message.body.error_code).await?;
+    pub async fn write_response(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.stream.write_all(data).await?;
         self.stream.flush().await?;
-        Ok(())
-    }
-
-    async fn write_i32(&mut self, value: i32) -> io::Result<()> {
-        self.stream.write_i32(value).await?;
-        Ok(())
-    }
-
-    async fn write_i16(&mut self, value: i16) -> io::Result<()> {
-        self.stream.write_i16(value).await?;
         Ok(())
     }
 }

@@ -5,7 +5,7 @@ use tokio::{
     sync::{Semaphore, broadcast, mpsc},
 };
 
-use crate::connection::Connection;
+use crate::{connection::Connection, protocol::ApiVersionsResponse};
 const MAX_CONNECTIONS: usize = 100;
 
 #[derive(Debug)]
@@ -68,19 +68,21 @@ struct Handler {
 impl Handler {
     pub async fn run(&mut self) -> crate::Result<()> {
         loop {
-            let message = tokio::select! {
-                res = self.connection.read_message()=>res,
+            let request = tokio::select! {
+                res = self.connection.read_request()=>res,
                 _= self.shutdown.recv()=> {
                         return Ok(());
                     }
             };
 
-            let message = match message {
-                Ok(message) => message,
+            let request = match request {
+                Ok(request) => request,
                 Err(_) => return Ok(()),
             };
 
-            self.connection.write_message(message).await?;
+            let response = ApiVersionsResponse::from_request(&request);
+            let data = response.serialize();
+            self.connection.write_response(&data).await?;
         }
     }
 }

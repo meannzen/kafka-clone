@@ -1,5 +1,5 @@
 pub mod connection;
-pub mod message;
+pub mod protocol;
 pub mod service;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
