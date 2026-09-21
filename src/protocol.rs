@@ -74,11 +74,18 @@ impl ApiVersionsResponse {
         ApiVersionsResponse {
             correlation_id: req.header.correlation_id,
             error_code,
-            api_keys: vec![ApiVersion {
-                api_key: 18,
-                min_version: 0,
-                max_version: 4,
-            }],
+            api_keys: vec![
+                ApiVersion {
+                    api_key: 18,
+                    min_version: 0,
+                    max_version: 4,
+                },
+                ApiVersion {
+                    api_key: 75,
+                    min_version: 0,
+                    max_version: 0,
+                },
+            ],
             throttle_time_ms: 0,
         }
     }
