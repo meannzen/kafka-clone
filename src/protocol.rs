@@ -13,6 +13,7 @@ pub struct RequestHeader {
 pub struct Request {
     pub message_size: i32,
     pub header: RequestHeader,
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -28,6 +29,23 @@ pub struct ApiVersionsResponse {
     pub error_code: i16,
     pub api_keys: Vec<ApiVersion>,
     pub throttle_time_ms: i32,
+}
+
+#[derive(Debug)]
+pub struct TopicResponse {
+    pub error_code: i16,
+    pub topic_name: String,
+    pub topic_id: [u8; 16],
+    pub is_internal: bool,
+    pub partitions: Vec<()>,
+    pub topic_authorized_operations: i32,
+}
+
+#[derive(Debug)]
+pub struct DescribeTopicPartitionResponse {
+    pub correlation_id: i32,
+    pub throttle_time_ms: i32,
+    pub topics: Vec<TopicResponse>,
 }
 
 #[derive(Debug)]
@@ -50,7 +68,8 @@ impl Request {
         if src.remaining() < remaining {
             return Err(Error::Incomplete);
         }
-        src.advance(remaining);
+        let body = src.chunk()[..remaining].to_vec();
+        src.advance(body.len());
 
         Ok(Request {
             message_size,
@@ -59,7 +78,12 @@ impl Request {
                 request_api_version,
                 correlation_id,
             },
+            body,
         })
+    }
+
+    pub fn correlation_id(&self) -> i32 {
+        self.header.correlation_id
     }
 }
 
@@ -115,6 +139,115 @@ impl ApiVersionsResponse {
         msg.extend_from_slice(&body);
         msg
     }
+}
+
+impl DescribeTopicPartitionResponse {
+    pub fn unknown_topic(correlation_id: i32, topic_name: String) -> Self {
+        Self {
+            correlation_id,
+            throttle_time_ms: 0,
+            topics: vec![TopicResponse {
+                error_code: 3, // UNKNOWN_TOPIC_OR_PARTITION
+                topic_name,
+                topic_id: [0u8; 16],
+                is_internal: false,
+                partitions: vec![],
+                topic_authorized_operations: 0,
+            }],
+        }
+    }
+
+    pub fn from_request(request: &Request) -> crate::Result<Self> {
+        let topic_name = parse_topic_name(&request.body)?;
+        Ok(Self::unknown_topic(request.correlation_id(), topic_name))
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+
+        body.extend_from_slice(&self.correlation_id.to_be_bytes());
+        body.push(0); // TAG_BUFFER
+
+        body.extend_from_slice(&self.throttle_time_ms.to_be_bytes());
+
+        body.push((self.topics.len() as u8) + 1);
+
+        for topic in &self.topics {
+            body.extend_from_slice(&topic.error_code.to_be_bytes());
+
+            let name_bytes = topic.topic_name.as_bytes();
+            body.push((name_bytes.len() as u8) + 1);
+            body.extend_from_slice(name_bytes);
+
+            body.extend_from_slice(&topic.topic_id);
+
+            body.push(u8::from(topic.is_internal));
+
+            body.push(1);
+
+            body.extend_from_slice(&topic.topic_authorized_operations.to_be_bytes());
+
+            // TAG_BUFFER for this topic
+            body.push(0);
+        }
+
+        // next_cursor = null
+        body.push(0xFF);
+
+        // final TAG_BUFFER
+        body.push(0);
+
+        // ── Prepend message size ────────────────────────────
+        let mut msg = Vec::with_capacity(4 + body.len());
+        msg.extend_from_slice(&(body.len() as i32).to_be_bytes());
+        msg.extend_from_slice(&body);
+        msg
+    }
+}
+
+fn parse_topic_name(body: &[u8]) -> crate::Result<String> {
+    let mut cursor = std::io::Cursor::new(body);
+
+    let client_id_len = get_i16(&mut cursor)? as usize;
+    if client_id_len > 0 {
+        if cursor.remaining() < client_id_len {
+            return Err(Error::Incomplete.into());
+        }
+        cursor.advance(client_id_len);
+    }
+
+    let _tag = get_u8(&mut cursor)?;
+
+    let topics_len = get_u8(&mut cursor)? as usize;
+    if topics_len == 0 {
+        return Err("empty topics array".into());
+    }
+    let num_topics = topics_len - 1;
+    if num_topics == 0 {
+        return Err("no topics requested".into());
+    }
+
+    let name_len = get_u8(&mut cursor)? as usize;
+    if name_len == 0 {
+        return Err("null topic name".into());
+    }
+    let name_len = name_len - 1;
+
+    if cursor.remaining() < name_len {
+        return Err(Error::Incomplete.into());
+    }
+
+    let name_bytes = &cursor.chunk()[..name_len];
+    let topic_name = String::from_utf8_lossy(name_bytes).into_owned();
+
+    Ok(topic_name)
+}
+
+fn get_u8(src: &mut std::io::Cursor<&[u8]>) -> Result<u8, Error> {
+    if src.remaining() < 1 {
+        return Err(Error::Incomplete);
+    }
+    Ok(src.get_u8())
 }
 
 fn get_i16(src: &mut Cursor<&[u8]>) -> Result<i16, Error> {

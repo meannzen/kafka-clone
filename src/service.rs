@@ -5,7 +5,10 @@ use tokio::{
     sync::{Semaphore, broadcast, mpsc},
 };
 
-use crate::{connection::Connection, protocol::ApiVersionsResponse};
+use crate::{
+    connection::Connection,
+    protocol::{ApiVersionsResponse, DescribeTopicPartitionResponse},
+};
 const MAX_CONNECTIONS: usize = 100;
 
 #[derive(Debug)]
@@ -80,8 +83,18 @@ impl Handler {
                 Err(_) => return Ok(()),
             };
 
-            let response = ApiVersionsResponse::from_request(&request);
-            let data = response.serialize();
+            let data = match request.header.request_api_key {
+                18 => {
+                    let response = ApiVersionsResponse::from_request(&request);
+                    response.serialize()
+                }
+                75 => {
+                    let response = DescribeTopicPartitionResponse::from_request(&request)?;
+                    response.serialize()
+                }
+                key => return Err(format!("unsupported api key {}", key).into()),
+            };
+
             self.connection.write_response(&data).await?;
         }
     }
