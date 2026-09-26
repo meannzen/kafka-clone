@@ -298,12 +298,12 @@ impl FetchResponse {
     pub fn serialize(&self) -> Vec<u8> {
         let mut body = Vec::new();
 
-        body.extend_from_slice(&self.correlation_id.to_be_bytes());  // 4
+        body.extend_from_slice(&self.correlation_id.to_be_bytes()); // 4
         body.push(0); // TAG_BUFFER
         body.extend_from_slice(&self.error_code.to_be_bytes()); //2
 
         body.extend_from_slice(&self.throttle_time_ms.to_be_bytes()); //2
-        let session_id : i32 = 0;
+        let session_id: i32 = 0;
         body.extend_from_slice(&session_id.to_be_bytes());
         //  topic length
         body.push((self.topics.len() as u8) + 1);
@@ -338,9 +338,8 @@ impl FetchResponse {
             body.push(0);
         }
 
-            // TAG_BUFFER for this topic fuck up here
-            body.push(0);
-
+        // TAG_BUFFER for this topic fuck up here
+        body.push(0);
 
         // ── Prepend message size ────────────────────────────
         let mut msg = Vec::with_capacity(4 + body.len());
