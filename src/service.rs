@@ -6,9 +6,7 @@ use tokio::{
 };
 
 use crate::{
-    connection::Connection,
-    metadata::parser::BatchRecord,
-    protocol::{ApiVersionsResponse, DescribeTopicPartitionResponse},
+    connection::Connection, metadata::parser::BatchRecord, protocol::{ApiVersionsResponse, DescribeTopicPartitionResponse, FetchResponse},
 };
 const MAX_CONNECTIONS: usize = 100;
 
@@ -89,6 +87,10 @@ impl Handler {
             };
 
             let data = match request.header.request_api_key {
+                1 => {
+                    let response = FetchResponse::from_request(&request);
+                    response.serialize()
+                },
                 18 => {
                     let response = ApiVersionsResponse::from_request(&request);
                     response.serialize()

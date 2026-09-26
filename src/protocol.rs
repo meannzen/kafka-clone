@@ -61,6 +61,14 @@ pub struct DescribeTopicPartitionResponse {
 }
 
 #[derive(Debug)]
+pub struct FetchResponse {
+    pub correlation_id: i32,
+    pub error_code: i16,
+    pub throttle_time_ms: i32,
+    pub topics: Vec<TopicResponse>,
+}
+
+#[derive(Debug)]
 pub enum Error {
     Incomplete,
     Other(crate::Error),
@@ -125,8 +133,7 @@ impl ApiVersionsResponse {
                     api_key: 1,
                     min_version: 0,
                     max_version: 16,
-
-                }
+                },
             ],
             throttle_time_ms: 0,
         }
@@ -275,6 +282,71 @@ fn put_compact_i32_array(body: &mut Vec<u8>, values: &[i32]) {
     body.push((values.len() as u8) + 1);
     for value in values {
         body.extend_from_slice(&value.to_be_bytes());
+    }
+}
+
+impl FetchResponse {
+    pub fn from_request(request: &Request) -> Self {
+        Self {
+            correlation_id: request.correlation_id(),
+            error_code: 0,
+            throttle_time_ms: 0,
+            topics: vec![],
+        }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+
+        body.extend_from_slice(&self.correlation_id.to_be_bytes());  // 4
+        body.push(0); // TAG_BUFFER
+        body.extend_from_slice(&self.error_code.to_be_bytes()); //2
+
+        body.extend_from_slice(&self.throttle_time_ms.to_be_bytes()); //2
+        let session_id : i32 = 0;
+        body.extend_from_slice(&session_id.to_be_bytes());
+        //  topic length
+        body.push((self.topics.len() as u8) + 1);
+        for topic in &self.topics {
+            body.extend_from_slice(&topic.error_code.to_be_bytes());
+
+            let name_bytes = topic.topic_name.as_bytes();
+            body.push((name_bytes.len() as u8) + 1);
+            body.extend_from_slice(name_bytes);
+
+            body.extend_from_slice(&topic.topic_id);
+
+            body.push(u8::from(topic.is_internal));
+
+            body.push((topic.partitions.len() as u8) + 1);
+            for partition in &topic.partitions {
+                body.extend_from_slice(&partition.error_code.to_be_bytes());
+                body.extend_from_slice(&partition.partition_index.to_be_bytes());
+                body.extend_from_slice(&partition.leader_id.to_be_bytes());
+                body.extend_from_slice(&partition.leader_epoch.to_be_bytes());
+                put_compact_i32_array(&mut body, &partition.replica_nodes);
+                put_compact_i32_array(&mut body, &partition.isr_nodes);
+                put_compact_i32_array(&mut body, &[]); // eligible_leader_replicas
+                put_compact_i32_array(&mut body, &[]); // last_known_elr
+                put_compact_i32_array(&mut body, &[]); // offline_replicas
+                body.push(0); // TAG_BUFFER
+            }
+
+            body.extend_from_slice(&topic.topic_authorized_operations.to_be_bytes());
+
+            // TAG_BUFFER for this topic
+            body.push(0);
+        }
+
+            // TAG_BUFFER for this topic fuck up here
+            body.push(0);
+
+
+        // ── Prepend message size ────────────────────────────
+        let mut msg = Vec::with_capacity(4 + body.len());
+        msg.extend_from_slice(&(body.len() as i32).to_be_bytes());
+        msg.extend_from_slice(&body);
+        msg
     }
 }
 
