@@ -191,7 +191,6 @@ impl MetaParser {
                 let _frame_version = get_u8(&mut src)?;
                 let type_record = get_u8(&mut src)?;
 
-                // Unknown record types are skipped rather than failing the whole log
                 let record = match type_record {
                     2 => Some(Record::Topic(TopicRecord::parse(&mut src)?)),
                     3 => Some(Record::Partition(PartitionRecord::parse(&mut src)?)),

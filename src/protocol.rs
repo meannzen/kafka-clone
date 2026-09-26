@@ -121,6 +121,12 @@ impl ApiVersionsResponse {
                     min_version: 0,
                     max_version: 0,
                 },
+                ApiVersion {
+                    api_key: 1,
+                    min_version: 0,
+                    max_version: 16,
+
+                }
             ],
             throttle_time_ms: 0,
         }
