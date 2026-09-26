@@ -2,6 +2,8 @@ use bytes::Buf;
 use core::fmt;
 use std::io::Cursor;
 
+use crate::metadata::parser::{self, BatchRecord};
+
 #[derive(Debug)]
 pub struct RequestHeader {
     pub request_api_key: i16,
@@ -32,12 +34,22 @@ pub struct ApiVersionsResponse {
 }
 
 #[derive(Debug)]
+pub struct PartitionResponse {
+    pub error_code: i16,
+    pub partition_index: i32,
+    pub leader_id: i32,
+    pub leader_epoch: i32,
+    pub replica_nodes: Vec<i32>,
+    pub isr_nodes: Vec<i32>,
+}
+
+#[derive(Debug)]
 pub struct TopicResponse {
     pub error_code: i16,
     pub topic_name: String,
     pub topic_id: [u8; 16],
     pub is_internal: bool,
-    pub partitions: Vec<()>,
+    pub partitions: Vec<PartitionResponse>,
     pub topic_authorized_operations: i32,
 }
 
@@ -141,25 +153,61 @@ impl ApiVersionsResponse {
     }
 }
 
-impl DescribeTopicPartitionResponse {
-    pub fn unknown_topic(correlation_id: i32, topic_name: String) -> Self {
+impl TopicResponse {
+    pub fn unknown(topic_name: String) -> Self {
         Self {
-            correlation_id,
-            throttle_time_ms: 0,
-            topics: vec![TopicResponse {
-                error_code: 3, // UNKNOWN_TOPIC_OR_PARTITION
-                topic_name,
-                topic_id: [0u8; 16],
-                is_internal: false,
-                partitions: vec![],
-                topic_authorized_operations: 0,
-            }],
+            error_code: 3, // UNKNOWN_TOPIC_OR_PARTITION
+            topic_name,
+            topic_id: [0u8; 16],
+            is_internal: false,
+            partitions: vec![],
+            topic_authorized_operations: 0,
         }
     }
 
-    pub fn from_request(request: &Request) -> crate::Result<Self> {
-        let topic_name = parse_topic_name(&request.body)?;
-        Ok(Self::unknown_topic(request.correlation_id(), topic_name))
+    pub fn lookup(topic_name: String, metadata: &[BatchRecord]) -> Self {
+        let Some(topic) = parser::find_topic(metadata, &topic_name) else {
+            return Self::unknown(topic_name);
+        };
+
+        let mut partitions: Vec<PartitionResponse> =
+            parser::find_partitions(metadata, &topic.topic_id)
+                .into_iter()
+                .map(|partition| PartitionResponse {
+                    error_code: 0,
+                    partition_index: partition.partition_id,
+                    leader_id: partition.leader,
+                    leader_epoch: partition.leader_epoch,
+                    replica_nodes: partition.replicas.clone(),
+                    isr_nodes: partition.isr.clone(),
+                })
+                .collect();
+        partitions.sort_by_key(|partition| partition.partition_index);
+
+        Self {
+            error_code: 0,
+            topic_name,
+            topic_id: topic.topic_id,
+            is_internal: false,
+            partitions,
+            topic_authorized_operations: 0x0000_0df8,
+        }
+    }
+}
+
+impl DescribeTopicPartitionResponse {
+    pub fn from_request(request: &Request, metadata: &[BatchRecord]) -> crate::Result<Self> {
+        let mut topic_names = parse_topic_names(&request.body)?;
+        topic_names.sort();
+
+        Ok(Self {
+            correlation_id: request.correlation_id(),
+            throttle_time_ms: 0,
+            topics: topic_names
+                .into_iter()
+                .map(|name| TopicResponse::lookup(name, metadata))
+                .collect(),
+        })
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -183,7 +231,19 @@ impl DescribeTopicPartitionResponse {
 
             body.push(u8::from(topic.is_internal));
 
-            body.push(1);
+            body.push((topic.partitions.len() as u8) + 1);
+            for partition in &topic.partitions {
+                body.extend_from_slice(&partition.error_code.to_be_bytes());
+                body.extend_from_slice(&partition.partition_index.to_be_bytes());
+                body.extend_from_slice(&partition.leader_id.to_be_bytes());
+                body.extend_from_slice(&partition.leader_epoch.to_be_bytes());
+                put_compact_i32_array(&mut body, &partition.replica_nodes);
+                put_compact_i32_array(&mut body, &partition.isr_nodes);
+                put_compact_i32_array(&mut body, &[]); // eligible_leader_replicas
+                put_compact_i32_array(&mut body, &[]); // last_known_elr
+                put_compact_i32_array(&mut body, &[]); // offline_replicas
+                body.push(0); // TAG_BUFFER
+            }
 
             body.extend_from_slice(&topic.topic_authorized_operations.to_be_bytes());
 
@@ -194,7 +254,7 @@ impl DescribeTopicPartitionResponse {
         // next_cursor = null
         body.push(0xFF);
 
-        // final TAG_BUFFER
+        // final TAG_BUFFER this wtf
         body.push(0);
 
         // ── Prepend message size ────────────────────────────
@@ -205,11 +265,19 @@ impl DescribeTopicPartitionResponse {
     }
 }
 
-fn parse_topic_name(body: &[u8]) -> crate::Result<String> {
+fn put_compact_i32_array(body: &mut Vec<u8>, values: &[i32]) {
+    body.push((values.len() as u8) + 1);
+    for value in values {
+        body.extend_from_slice(&value.to_be_bytes());
+    }
+}
+
+fn parse_topic_names(body: &[u8]) -> crate::Result<Vec<String>> {
     let mut cursor = std::io::Cursor::new(body);
 
-    let client_id_len = get_i16(&mut cursor)? as usize;
+    let client_id_len = get_i16(&mut cursor)?;
     if client_id_len > 0 {
+        let client_id_len = client_id_len as usize;
         if cursor.remaining() < client_id_len {
             return Err(Error::Incomplete.into());
         }
@@ -227,20 +295,26 @@ fn parse_topic_name(body: &[u8]) -> crate::Result<String> {
         return Err("no topics requested".into());
     }
 
-    let name_len = get_u8(&mut cursor)? as usize;
-    if name_len == 0 {
-        return Err("null topic name".into());
+    let mut topic_names = Vec::with_capacity(num_topics);
+    for _ in 0..num_topics {
+        let name_len = get_u8(&mut cursor)? as usize;
+        if name_len == 0 {
+            return Err("null topic name".into());
+        }
+        let name_len = name_len - 1;
+
+        if cursor.remaining() < name_len {
+            return Err(Error::Incomplete.into());
+        }
+
+        let name_bytes = &cursor.chunk()[..name_len];
+        topic_names.push(String::from_utf8_lossy(name_bytes).into_owned());
+        cursor.advance(name_len);
+
+        let _tag = get_u8(&mut cursor)?; // per-topic TAG_BUFFER
     }
-    let name_len = name_len - 1;
 
-    if cursor.remaining() < name_len {
-        return Err(Error::Incomplete.into());
-    }
-
-    let name_bytes = &cursor.chunk()[..name_len];
-    let topic_name = String::from_utf8_lossy(name_bytes).into_owned();
-
-    Ok(topic_name)
+    Ok(topic_names)
 }
 
 fn get_u8(src: &mut std::io::Cursor<&[u8]>) -> Result<u8, Error> {

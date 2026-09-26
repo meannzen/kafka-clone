@@ -7,6 +7,7 @@ use tokio::{
 
 use crate::{
     connection::Connection,
+    metadata::parser::BatchRecord,
     protocol::{ApiVersionsResponse, DescribeTopicPartitionResponse},
 };
 const MAX_CONNECTIONS: usize = 100;
@@ -14,6 +15,7 @@ const MAX_CONNECTIONS: usize = 100;
 #[derive(Debug)]
 struct Listener {
     listener: TcpListener,
+    cluster_metadata_log: Arc<Vec<BatchRecord>>,
     limit_connection: Arc<Semaphore>,
     notify_shutdown: broadcast::Sender<()>,
     shutdown_complete_tx: mpsc::Sender<()>,
@@ -25,9 +27,11 @@ impl Listener {
             let permit = self.limit_connection.clone().acquire_owned().await.unwrap();
             let socket = self.accept().await?;
             let connection = Connection::new(socket);
+            let batch_records = self.cluster_metadata_log.clone();
             let mut handler = Handler {
                 connection,
                 shutdown: Shutdown::new(self.notify_shutdown.subscribe()),
+                cluster_metadata_log: batch_records.clone(),
                 _shutdown_complete: self.shutdown_complete_tx.clone(),
             };
 
@@ -65,6 +69,7 @@ impl Listener {
 struct Handler {
     connection: Connection,
     shutdown: Shutdown,
+    cluster_metadata_log: Arc<Vec<BatchRecord>>,
     _shutdown_complete: mpsc::Sender<()>,
 }
 
@@ -89,7 +94,10 @@ impl Handler {
                     response.serialize()
                 }
                 75 => {
-                    let response = DescribeTopicPartitionResponse::from_request(&request)?;
+                    let response = DescribeTopicPartitionResponse::from_request(
+                        &request,
+                        &self.cluster_metadata_log,
+                    )?;
                     response.serialize()
                 }
                 key => return Err(format!("unsupported api key {}", key).into()),
@@ -100,7 +108,11 @@ impl Handler {
     }
 }
 
-pub async fn run(listener: TcpListener, shutdown: impl Future) -> crate::Result<()> {
+pub async fn run(
+    listener: TcpListener,
+    cluster_metadata_log: Vec<BatchRecord>,
+    shutdown: impl Future,
+) -> crate::Result<()> {
     let (notify_shutdown, _) = broadcast::channel(1);
     let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel(1);
     let server = Listener {
@@ -108,6 +120,7 @@ pub async fn run(listener: TcpListener, shutdown: impl Future) -> crate::Result<
         limit_connection: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         notify_shutdown,
         shutdown_complete_tx,
+        cluster_metadata_log: Arc::new(cluster_metadata_log),
     };
 
     tokio::select! {
