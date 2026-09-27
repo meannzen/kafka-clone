@@ -1,8 +1,8 @@
 use bytes::Buf;
 use core::fmt;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
-use crate::metadata::parser::{self, BatchRecord};
+use crate::metadata::parser::{self, BatchRecord, get_uvarint};
 
 #[derive(Debug)]
 pub struct RequestHeader {
@@ -61,11 +61,28 @@ pub struct DescribeTopicPartitionResponse {
 }
 
 #[derive(Debug)]
+pub struct FetchPartitionResponse {
+    pub partition_index: i32,
+    pub error_code: i16,
+}
+
+#[derive(Debug)]
+pub struct FetchTopicResponse {
+    pub topic_id: [u8; 16],
+    pub partitions: Vec<FetchPartitionResponse>,
+}
+
+#[derive(Debug)]
 pub struct FetchResponse {
     pub correlation_id: i32,
     pub error_code: i16,
     pub throttle_time_ms: i32,
-    pub topics: Vec<TopicResponse>,
+    pub topics: Vec<FetchTopicResponse>,
+}
+
+struct FetchTopicRequest {
+    topic_id: [u8; 16],
+    partitions: Vec<i32>,
 }
 
 #[derive(Debug)]
@@ -210,7 +227,7 @@ impl TopicResponse {
 
 impl DescribeTopicPartitionResponse {
     pub fn from_request(request: &Request, metadata: &[BatchRecord]) -> crate::Result<Self> {
-        let mut topic_names = parse_topic_names(&request.body)?;
+        let mut topic_names = parse_describe_topic_name(&request.body)?;
         topic_names.sort();
 
         Ok(Self {
@@ -285,63 +302,68 @@ fn put_compact_i32_array(body: &mut Vec<u8>, values: &[i32]) {
     }
 }
 
-impl FetchResponse {
-    pub fn from_request(request: &Request) -> Self {
+impl FetchTopicResponse {
+    fn lookup(request: FetchTopicRequest, metadata: &[BatchRecord]) -> Self {
+        let error_code = match parser::find_topic_by_id(metadata, &request.topic_id) {
+            Some(_) => 0,
+            None => 100,
+        };
         Self {
+            topic_id: request.topic_id,
+            partitions: request
+                .partitions
+                .into_iter()
+                .map(|partition_index| FetchPartitionResponse {
+                    partition_index,
+                    error_code,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl FetchResponse {
+    pub fn from_request(request: &Request, metadata: &[BatchRecord]) -> crate::Result<Self> {
+        let topics = parse_fetch_request_body(&request.body)?
+            .into_iter()
+            .map(|topic| FetchTopicResponse::lookup(topic, metadata))
+            .collect();
+        Ok(Self {
             correlation_id: request.correlation_id(),
             error_code: 0,
             throttle_time_ms: 0,
-            topics: vec![],
-        }
+            topics,
+        })
     }
 
     pub fn serialize(&self) -> Vec<u8> {
         let mut body = Vec::new();
 
-        body.extend_from_slice(&self.correlation_id.to_be_bytes()); // 4
-        body.push(0); // TAG_BUFFER
-        body.extend_from_slice(&self.error_code.to_be_bytes()); //2
+        body.extend_from_slice(&self.correlation_id.to_be_bytes());
+        body.push(0);
+        body.extend_from_slice(&self.throttle_time_ms.to_be_bytes());
+        body.extend_from_slice(&self.error_code.to_be_bytes());
+        body.extend_from_slice(&0i32.to_be_bytes());
 
-        body.extend_from_slice(&self.throttle_time_ms.to_be_bytes()); //2
-        let session_id: i32 = 0;
-        body.extend_from_slice(&session_id.to_be_bytes());
-        //  topic length
         body.push((self.topics.len() as u8) + 1);
         for topic in &self.topics {
-            body.extend_from_slice(&topic.error_code.to_be_bytes());
-
-            let name_bytes = topic.topic_name.as_bytes();
-            body.push((name_bytes.len() as u8) + 1);
-            body.extend_from_slice(name_bytes);
-
             body.extend_from_slice(&topic.topic_id);
-
-            body.push(u8::from(topic.is_internal));
-
             body.push((topic.partitions.len() as u8) + 1);
             for partition in &topic.partitions {
-                body.extend_from_slice(&partition.error_code.to_be_bytes());
                 body.extend_from_slice(&partition.partition_index.to_be_bytes());
-                body.extend_from_slice(&partition.leader_id.to_be_bytes());
-                body.extend_from_slice(&partition.leader_epoch.to_be_bytes());
-                put_compact_i32_array(&mut body, &partition.replica_nodes);
-                put_compact_i32_array(&mut body, &partition.isr_nodes);
-                put_compact_i32_array(&mut body, &[]); // eligible_leader_replicas
-                put_compact_i32_array(&mut body, &[]); // last_known_elr
-                put_compact_i32_array(&mut body, &[]); // offline_replicas
-                body.push(0); // TAG_BUFFER
+                body.extend_from_slice(&partition.error_code.to_be_bytes());
+                body.extend_from_slice(&0i64.to_be_bytes());
+                body.extend_from_slice(&0i64.to_be_bytes());
+                body.extend_from_slice(&0i64.to_be_bytes());
+                body.push(1);
+                body.extend_from_slice(&(-1i32).to_be_bytes());
+                body.push(1);
+                body.push(0);
             }
-
-            body.extend_from_slice(&topic.topic_authorized_operations.to_be_bytes());
-
-            // TAG_BUFFER for this topic
             body.push(0);
         }
-
-        // TAG_BUFFER for this topic fuck up here
         body.push(0);
 
-        // ── Prepend message size ────────────────────────────
         let mut msg = Vec::with_capacity(4 + body.len());
         msg.extend_from_slice(&(body.len() as i32).to_be_bytes());
         msg.extend_from_slice(&body);
@@ -349,7 +371,53 @@ impl FetchResponse {
     }
 }
 
-fn parse_topic_names(body: &[u8]) -> crate::Result<Vec<String>> {
+fn parse_fetch_request_body(body: &[u8]) -> crate::Result<Vec<FetchTopicRequest>> {
+    let mut src = std::io::Cursor::new(body);
+
+    let client_id_len = get_i16(&mut src)?;
+    if client_id_len > 0 {
+        let client_id_len = client_id_len as usize;
+        if src.remaining() < client_id_len {
+            return Err(Error::Incomplete.into());
+        }
+        src.advance(client_id_len);
+    }
+
+    let _tag = get_u8(&mut src)?;
+    let _max_wait_ms = get_i32(&mut src)?;
+    let _min_bytes = get_i32(&mut src)?;
+    let _max_bytes = get_i32(&mut src)?;
+    let _isolation_level = get_i8(&mut src)?;
+    let _session_id = get_i32(&mut src)?;
+    let _session_epoch = get_i32(&mut src)?;
+
+    let num_topics = get_uvarint(&mut src)?.saturating_sub(1);
+    let mut topics = Vec::with_capacity(num_topics as usize);
+    for _ in 0..num_topics {
+        let mut topic_id = [0u8; 16];
+        src.read_exact(&mut topic_id)?;
+
+        let num_partitions = get_uvarint(&mut src)?.saturating_sub(1);
+        let mut partitions = Vec::with_capacity(num_partitions as usize);
+        for _ in 0..num_partitions {
+            partitions.push(get_i32(&mut src)?);
+            if src.remaining() < 28 {
+                return Err(Error::Incomplete.into());
+            }
+            src.advance(28);
+            let _tag = get_u8(&mut src)?;
+        }
+        let _tag = get_u8(&mut src)?;
+
+        topics.push(FetchTopicRequest {
+            topic_id,
+            partitions,
+        });
+    }
+    Ok(topics)
+}
+
+fn parse_describe_topic_name(body: &[u8]) -> crate::Result<Vec<String>> {
     let mut cursor = std::io::Cursor::new(body);
 
     let client_id_len = get_i16(&mut cursor)?;
@@ -399,6 +467,12 @@ fn get_u8(src: &mut std::io::Cursor<&[u8]>) -> Result<u8, Error> {
         return Err(Error::Incomplete);
     }
     Ok(src.get_u8())
+}
+fn get_i8(src: &mut std::io::Cursor<&[u8]>) -> Result<i8, Error> {
+    if src.remaining() < 1 {
+        return Err(Error::Incomplete);
+    }
+    Ok(src.get_i8())
 }
 
 fn get_i16(src: &mut Cursor<&[u8]>) -> Result<i16, Error> {

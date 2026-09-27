@@ -131,6 +131,19 @@ pub fn find_topic<'a>(batches: &'a [BatchRecord], name: &str) -> Option<&'a Topi
         })
 }
 
+pub fn find_topic_by_id<'a>(
+    batches: &'a [BatchRecord],
+    topic_id: &[u8; 16],
+) -> Option<&'a TopicRecord> {
+    batches
+        .iter()
+        .flat_map(|batch| &batch.records)
+        .find_map(|record| match record {
+            Record::Topic(topic) if &topic.topic_id == topic_id => Some(topic),
+            _ => None,
+        })
+}
+
 pub fn find_partitions<'a>(
     batches: &'a [BatchRecord],
     topic_id: &[u8; 16],
@@ -233,7 +246,7 @@ fn skip(src: &mut Cursor<&[u8]>, n: usize) -> Result<(), ParseError> {
     Ok(())
 }
 
-fn get_uvarint(src: &mut Cursor<&[u8]>) -> Result<u64, ParseError> {
+pub fn get_uvarint(src: &mut Cursor<&[u8]>) -> Result<u64, ParseError> {
     let mut value = 0u64;
     for shift in (0..64).step_by(7) {
         let byte = get_u8(src)?;

@@ -90,7 +90,7 @@ impl Handler {
 
             let data = match request.header.request_api_key {
                 1 => {
-                    let response = FetchResponse::from_request(&request);
+                    let response = FetchResponse::from_request(&request, &self.cluster_metadata_log)?;
                     response.serialize()
                 }
                 18 => {
