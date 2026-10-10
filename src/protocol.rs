@@ -139,6 +139,11 @@ impl ApiVersionsResponse {
             error_code,
             api_keys: vec![
                 ApiVersion {
+                    api_key: 0,
+                    min_version: 0,
+                    max_version: 11,
+                },
+                ApiVersion {
                     api_key: 18,
                     min_version: 0,
                     max_version: 4,
