@@ -2,6 +2,7 @@ use bytes::Buf;
 use core::fmt;
 use std::io::{Cursor, Read};
 
+use crate::metadata::LOG_DIR;
 use crate::metadata::parser::{self, BatchRecord, get_uvarint};
 
 #[derive(Debug)]
@@ -64,6 +65,7 @@ pub struct DescribeTopicPartitionResponse {
 pub struct FetchPartitionResponse {
     pub partition_index: i32,
     pub error_code: i16,
+    pub records: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -295,6 +297,14 @@ impl DescribeTopicPartitionResponse {
     }
 }
 
+fn put_uvarint(body: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        body.push((value as u8 & 0x7F) | 0x80);
+        value >>= 7;
+    }
+    body.push(value as u8);
+}
+
 fn put_compact_i32_array(body: &mut Vec<u8>, values: &[i32]) {
     body.push((values.len() as u8) + 1);
     for value in values {
@@ -304,18 +314,28 @@ fn put_compact_i32_array(body: &mut Vec<u8>, values: &[i32]) {
 
 impl FetchTopicResponse {
     fn lookup(request: FetchTopicRequest, metadata: &[BatchRecord]) -> Self {
-        let error_code = match parser::find_topic_by_id(metadata, &request.topic_id) {
-            Some(_) => 0,
-            None => 100,
-        };
+        let topic = parser::find_topic_by_id(metadata, &request.topic_id);
+        let error_code = if topic.is_some() { 0 } else { 100 };
         Self {
             topic_id: request.topic_id,
             partitions: request
                 .partitions
                 .into_iter()
-                .map(|partition_index| FetchPartitionResponse {
-                    partition_index,
-                    error_code,
+                .map(|partition_index| {
+                    let records = topic
+                        .and_then(|topic| {
+                            let path = format!(
+                                "{}/{}-{}/00000000000000000000.log",
+                                LOG_DIR, topic.topic_name, partition_index
+                            );
+                            std::fs::read(path).ok()
+                        })
+                        .unwrap_or_default();
+                    FetchPartitionResponse {
+                        partition_index,
+                        error_code,
+                        records,
+                    }
                 })
                 .collect(),
         }
@@ -357,7 +377,8 @@ impl FetchResponse {
                 body.extend_from_slice(&0i64.to_be_bytes());
                 body.push(1);
                 body.extend_from_slice(&(-1i32).to_be_bytes());
-                body.push(1);
+                put_uvarint(&mut body, partition.records.len() as u64 + 1);
+                body.extend_from_slice(&partition.records);
                 body.push(0);
             }
             body.push(0);
@@ -496,5 +517,42 @@ impl fmt::Display for Error {
             Error::Incomplete => write!(f, "stream ended early"),
             Error::Other(err) => write!(f, "{err}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uvarint_encoding() {
+        let mut b = Vec::new();
+        put_uvarint(&mut b, 1);
+        put_uvarint(&mut b, 300);
+        assert_eq!(b, vec![1, 0xAC, 0x02]);
+    }
+
+    #[test]
+    fn fetch_serializes_records() {
+        let resp = FetchResponse {
+            correlation_id: 7,
+            error_code: 0,
+            throttle_time_ms: 0,
+            topics: vec![FetchTopicResponse {
+                topic_id: [1; 16],
+                partitions: vec![FetchPartitionResponse {
+                    partition_index: 0,
+                    error_code: 0,
+                    records: vec![9, 8, 7],
+                }],
+            }],
+        };
+        let out = resp.serialize();
+        assert_eq!(
+            i32::from_be_bytes(out[..4].try_into().unwrap()) as usize,
+            out.len() - 4
+        );
+        let tail = &out[out.len() - 7..];
+        assert_eq!(tail, &[4, 9, 8, 7, 0, 0, 0]);
     }
 }
