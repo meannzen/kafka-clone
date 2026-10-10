@@ -6,7 +6,7 @@ use tokio::{
     net::TcpStream,
 };
 
-use crate::protocol::{self, Request};
+use crate::{codec::DecodeError, protocol::Request};
 
 #[derive(Debug)]
 pub struct Connection {
@@ -24,8 +24,8 @@ impl Connection {
 
     pub async fn read_request(&mut self) -> crate::Result<Request> {
         loop {
-            if let Ok(message) = self.parse_request() {
-                return Ok(message);
+            if let Some(request) = self.parse_request()? {
+                return Ok(request);
             }
 
             if 0 == self.stream.read_buf(&mut self.buffer).await? {
@@ -38,20 +38,24 @@ impl Connection {
         }
     }
 
-    fn parse_request(&mut self) -> crate::Result<Request> {
+    fn parse_request(&mut self) -> crate::Result<Option<Request>> {
         let mut cursor = Cursor::new(&self.buffer[..]);
-        match protocol::Request::parse(&mut cursor) {
-            Ok(reponse) => {
+        match Request::parse(&mut cursor) {
+            Ok(request) => {
                 let len = cursor.position() as usize;
                 self.buffer.advance(len);
-                Ok(reponse)
+                Ok(Some(request))
             }
+            Err(DecodeError::Incomplete) => Ok(None),
             Err(err) => Err(err.into()),
         }
     }
 
-    pub async fn write_response(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.stream.write_all(data).await?;
+    pub async fn write_response(&mut self, body: &[u8]) -> std::io::Result<()> {
+        self.stream
+            .write_all(&(body.len() as i32).to_be_bytes())
+            .await?;
+        self.stream.write_all(body).await?;
         self.stream.flush().await?;
         Ok(())
     }
