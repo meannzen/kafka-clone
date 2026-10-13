@@ -7,6 +7,7 @@ use std::io::Cursor;
 
 use crate::{
     codec::{Decode, DecodeError, Encode, get_bytes, get_nullable_string, skip_tagged_fields},
+    protocol::produce::response::ProduceResponse,
     storage::ClusterMetadata,
 };
 
@@ -97,7 +98,8 @@ pub fn respond(request: &Request, metadata: &ClusterMetadata) -> crate::Result<V
         Ok(ApiKey::DescribeTopicPartitions) => {
             DescribeTopicPartitionResponse::from_request(request, metadata)?.encode(&mut body)
         }
-        Ok(ApiKey::Produce) | Err(_) => {
+        Ok(ApiKey::Produce) => ProduceResponse::from_request(request, metadata)?.encode(&mut body),
+        Err(_) => {
             return Err(format!("unsupported api key {}", api_key).into());
         }
     }

@@ -44,6 +44,14 @@ pub fn get_nullable_string(src: &mut Cursor<&[u8]>) -> Result<Option<String>, De
     Ok(Some(String::from_utf8(get_bytes(src, len as usize)?)?))
 }
 
+pub fn get_compact_nullable_string(src: &mut Cursor<&[u8]>) -> Result<Option<String>, DecodeError> {
+    let len = get_uvarint(src)?;
+    if len == 0 {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8(get_bytes(src, len as usize - 1)?)?))
+}
+
 pub fn skip_tagged_fields(src: &mut Cursor<&[u8]>) -> Result<(), DecodeError> {
     let count = get_uvarint(src)?;
     for _ in 0..count {
