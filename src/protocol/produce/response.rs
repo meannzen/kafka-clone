@@ -1,9 +1,10 @@
 use crate::{
     codec::{Decode, Encode, put_compact_array, put_compact_string, put_tagged_fields},
     protocol::{Request, produce::request::ProduceRequest},
-    storage::ClusterMetadata,
+    storage::{ClusterMetadata, log::write_log},
 };
 
+const UNKNOWN_SERVER_ERROR: i16 = -1;
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
 
 #[derive(Debug)]
@@ -51,6 +52,16 @@ impl ProduceResponse {
                     .iter()
                     .map(|partition| {
                         if partition_ids.contains(&partition.index) {
+                            if write_log(&topic.name, partition.index, &partition.records).is_err()
+                            {
+                                return ProducePartitionResponse {
+                                    index: partition.index,
+                                    error_code: UNKNOWN_SERVER_ERROR,
+                                    base_offset: -1,
+                                    log_append_time_ms: -1,
+                                    log_start_offset: -1,
+                                };
+                            }
                             ProducePartitionResponse {
                                 index: partition.index,
                                 error_code: 0,
